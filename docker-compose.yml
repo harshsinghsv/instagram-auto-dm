@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: instagram_autodm_db
+    environment:
+      POSTGRES_USER: autodm_user
+      POSTGRES_PASSWORD: autodm_password
+      POSTGRES_DB: instagram_autodm
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autodm_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Instagram Auto-DM Application
+  app:
+    build: .
+    container_name: instagram_autodm_app
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://autodm_user:autodm_password@postgres:5432/instagram_autodm?sslmode=disable
+      VERIFY_TOKEN: ${VERIFY_TOKEN}
+      ACCESS_TOKEN: ${ACCESS_TOKEN}
+      IG_BUSINESS_ID: ${IG_BUSINESS_ID}
+      KEYWORDS: ${KEYWORDS}
+      DM_MESSAGE: ${DM_MESSAGE}
+      DM_DELAY: ${DM_DELAY:-1m}
+      MAX_RETRIES: ${MAX_RETRIES:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
