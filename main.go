@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -13,37 +12,32 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
+	"github.com/julienschmidt/httprouter"
 	_ "github.com/lib/pq"
 )
 
-// Configuration
+// CONFIG STRUCT
 type Config struct {
-	Port              string
-	DatabaseURL       string
-	VerifyToken       string
-	AccessToken       string
-	IGBusinessID      string
-	Keywords          []string
-	DMMessage         string
-	DMDelay           time.Duration
-	MaxRetries        int
-	RetryBackoffBase  time.Duration
+	Port             string
+	DatabaseURL      string
+	VerifyToken      string
+	AccessToken      string
+	IGBusinessID     string
+	Keywords         []string
+	DMMessage        string
+	DMDelay          time.Duration
+	MaxRetries       int
+	RetryBackoffBase time.Duration
 }
 
-// Webhook verification request
-type WebhookVerification struct {
-	Mode      string `json:"hub.mode"`
-	Challenge string `json:"hub.challenge"`
-	Token     string `json:"hub.verify_token"`
-}
-
-// Webhook comment event
+// WEBHOOK STRUCTS
 type WebhookPayload struct {
 	Object string `json:"object"`
 	Entry  []struct {
-		ID      string    `json:"id"`
-		Time    int64     `json:"time"`
-		Changes []Change  `json:"changes"`
+		ID      string   `json:"id"`
+		Time    int64    `json:"time"`
+		Changes []Change `json:"changes"`
 	} `json:"entry"`
 }
 
@@ -53,11 +47,11 @@ type Change struct {
 }
 
 type CommentData struct {
-	ID        string `json:"id"`
-	MediaID   string `json:"media_id"`
-	Text      string `json:"text"`
-	From      User   `json:"from"`
-	ParentID  string `json:"parent_id,omitempty"`
+	ID       string `json:"id"`
+	MediaID  string `json:"media_id"`
+	Text     string `json:"text"`
+	From     User   `json:"from"`
+	ParentID string `json:"parent_id,omitempty"`
 }
 
 type User struct {
@@ -65,18 +59,18 @@ type User struct {
 	Username string `json:"username"`
 }
 
-// Database models
+// DATABASE MODEL
 type DMLog struct {
-	ID          int
-	UserID      string
-	PostID      string
-	CommentID   string
-	SentAt      time.Time
-	Status      string
-	RetryCount  int
+	ID         int
+	UserID     string
+	PostID     string
+	CommentID  string
+	SentAt     time.Time
+	Status     string
+	RetryCount int
 }
 
-// DMJob for queue
+// JOB QUEUE STRUCT
 type DMJob struct {
 	UserID    string
 	PostID    string
@@ -86,88 +80,96 @@ type DMJob struct {
 	Timestamp time.Time
 }
 
-// Global dependencies
+// GLOBALS
 var (
-	db     *sql.DB
-	config Config
+	db      *sql.DB
+	config  Config
 	dmQueue chan DMJob
 )
 
+// ENTRY POINT
 func main() {
+	// Load .env before anything else
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("⚠️  .env file not found, using system env variables")
+	}
+
 	// Load configuration
 	config = loadConfig()
-	
-	// Initialize database
+
+	// Init DB
 	initDB()
 	defer db.Close()
-	
-	// Initialize DM queue
+
+	// DM queue
 	dmQueue = make(chan DMJob, 100)
-	
-	// Start DM worker
+
+	// Start worker
 	go dmWorker()
-	
-	// Setup HTTP routes
-	http.HandleFunc("/webhook", webhookHandler)
-	http.HandleFunc("/health", healthHandler)
-	
+
+	// Routes
+	router := httprouter.New()
+	router.GET("/webhook", webhookGETHandler)
+	router.POST("/webhook", webhookPOSTHandler)
+	router.GET("/health", healthHandler)
+
 	// Start server
-	port := config.Port
-	log.Printf("🚀 Instagram Auto-DM Server starting on port %s", port)
-	log.Printf("📋 Keywords: %v", config.Keywords)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Printf("🚀 Instagram Auto-DM Server running on port %s", config.Port)
+	log.Printf("📌 Keywords: %v", config.Keywords)
+	log.Fatal(http.ListenAndServe(":"+config.Port, router))
 }
 
+// CONFIG LOADER
 func loadConfig() Config {
 	keywords := strings.Split(os.Getenv("KEYWORDS"), ",")
 	for i := range keywords {
 		keywords[i] = strings.TrimSpace(strings.ToLower(keywords[i]))
 	}
-	
+
 	delay, _ := time.ParseDuration(os.Getenv("DM_DELAY"))
 	if delay == 0 {
-		delay = 1 * time.Minute
+		delay = 30 * time.Second
 	}
-	
+
 	maxRetries := 3
 	if mr := os.Getenv("MAX_RETRIES"); mr != "" {
 		fmt.Sscanf(mr, "%d", &maxRetries)
 	}
-	
+
 	return Config{
-		Port:              getEnv("PORT", "8080"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		VerifyToken:       os.Getenv("VERIFY_TOKEN"),
-		AccessToken:       os.Getenv("ACCESS_TOKEN"),
-		IGBusinessID:      os.Getenv("IG_BUSINESS_ID"),
-		Keywords:          keywords,
-		DMMessage:         os.Getenv("DM_MESSAGE"),
-		DMDelay:           delay,
-		MaxRetries:        maxRetries,
-		RetryBackoffBase:  2 * time.Second,
+		Port:             getEnv("PORT", "8080"),
+		DatabaseURL:      getEnv("DATABASE_URL", ""),
+		VerifyToken:      getEnv("VERIFY_TOKEN", ""),
+		AccessToken:      getEnv("ACCESS_TOKEN", ""),
+		IGBusinessID:     getEnv("IG_BUSINESS_ID", ""),
+		Keywords:         keywords,
+		DMMessage:        getEnv("DM_MESSAGE", "Thank you! 🙏"),
+		DMDelay:          delay,
+		MaxRetries:       maxRetries,
+		RetryBackoffBase: 2 * time.Second,
 	}
 }
 
 func getEnv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
 	return fallback
 }
 
+// DATABASE INIT
 func initDB() {
 	var err error
 	db, err = sql.Open("postgres", config.DatabaseURL)
 	if err != nil {
-		log.Fatal("Failed to connect to database:", err)
+		log.Fatal("❌ Failed to connect to DB:", err)
 	}
-	
-	// Test connection
+
 	if err := db.Ping(); err != nil {
-		log.Fatal("Failed to ping database:", err)
+		log.Fatal("❌ DB ping failed:", err)
 	}
-	
-	// Create tables
+
 	createTables()
 	log.Println("✅ Database connected")
 }
@@ -185,141 +187,146 @@ func createTables() {
 		error_message TEXT,
 		UNIQUE(user_id, post_id)
 	);
-	
+
 	CREATE INDEX IF NOT EXISTS idx_user_post ON dm_logs(user_id, post_id);
 	CREATE INDEX IF NOT EXISTS idx_status ON dm_logs(status);
 	`
-	
-	if _, err := db.Exec(schema); err != nil {
-		log.Fatal("Failed to create tables:", err)
+
+	_, err := db.Exec(schema)
+	if err != nil {
+		log.Fatal("❌ Failed to create tables:", err)
 	}
 }
 
-// Webhook handler
-func webhookHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		handleWebhookVerification(w, r)
-		return
-	}
-	
-	if r.Method == http.MethodPost {
-		handleWebhookEvent(w, r)
-		return
-	}
-	
-	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-}
-
-func handleWebhookVerification(w http.ResponseWriter, r *http.Request) {
+// WEBHOOK HANDLERS
+func webhookGETHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	mode := r.URL.Query().Get("hub.mode")
-	token := r.URL.Query().Get("hub.verify_token")
 	challenge := r.URL.Query().Get("hub.challenge")
-	
-	if mode == "subscribe" && token == config.VerifyToken {
-		log.Println("✅ Webhook verified")
+	token := r.URL.Query().Get("hub.verify_token")
+
+	if mode == "subscribe" && token != "" && token == config.VerifyToken {
+		log.Println("WEBHOOK VERIFIED")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(challenge))
 		return
 	}
-	
-	log.Println("❌ Webhook verification failed")
-	http.Error(w, "Verification failed", http.StatusForbidden)
+	w.WriteHeader(http.StatusForbidden)
 }
 
-func handleWebhookEvent(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		log.Println("Error reading webhook body:", err)
-		http.Error(w, "Bad request", http.StatusBadRequest)
+func webhookPOSTHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	log.Printf("\n\nWebhook received %s\n", timestamp)
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		log.Println("Error decoding webhook body:", err)
+		w.WriteHeader(http.StatusOK)
 		return
 	}
-	
-	var payload WebhookPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Println("Error parsing webhook payload:", err)
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-	
-	// Process each entry
-	for _, entry := range payload.Entry {
-		for _, change := range entry.Changes {
-			if change.Field == "comments" {
-				processComment(change.Value)
+	out, _ := json.MarshalIndent(payload, "", "  ")
+	log.Println(string(out))
+
+	// Process the webhook payload for comments
+	if entries, ok := payload["entry"].([]interface{}); ok {
+		for _, e := range entries {
+			entry, _ := e.(map[string]interface{})
+			if changes, ok := entry["changes"].([]interface{}); ok {
+				for _, c := range changes {
+					change, _ := c.(map[string]interface{})
+					if field, ok := change["field"].(string); ok && field == "comments" {
+						if value, ok := change["value"].(map[string]interface{}); ok {
+							// Convert map to CommentData struct
+							processCommentFromMap(value)
+						}
+					}
+				}
 			}
 		}
 	}
-	
+
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("EVENT_RECEIVED"))
 }
 
-func processComment(comment CommentData) {
-	log.Printf("📝 New comment from @%s: %s", comment.From.Username, comment.Text)
-	
-	// Check if comment contains keyword
-	commentLower := strings.ToLower(comment.Text)
-	hasKeyword := false
-	for _, keyword := range config.Keywords {
-		if strings.Contains(commentLower, keyword) {
-			hasKeyword = true
+// COMMENT PROCESSOR (from map)
+func processCommentFromMap(commentMap map[string]interface{}) {
+	// Extract fields from map
+	id, _ := commentMap["id"].(string)
+	mediaID, _ := commentMap["media_id"].(string)
+	text, _ := commentMap["text"].(string)
+
+	fromMap, _ := commentMap["from"].(map[string]interface{})
+	userID, _ := fromMap["id"].(string)
+	username, _ := fromMap["username"].(string)
+
+	c := CommentData{
+		ID:      id,
+		MediaID: mediaID,
+		Text:    text,
+		From: User{
+			ID:       userID,
+			Username: username,
+		},
+	}
+
+	processComment(c)
+}
+
+// COMMENT PROCESSOR
+func processComment(c CommentData) {
+	text := strings.ToLower(c.Text)
+
+	// Check keywords
+	match := false
+	for _, kw := range config.Keywords {
+		if strings.Contains(text, kw) {
+			match = true
 			break
 		}
 	}
-	
-	if !hasKeyword {
-		log.Printf("⏭️  Comment doesn't contain keywords, skipping")
+	if !match {
 		return
 	}
-	
-	// Check if DM already sent
-	if isDuplicate(comment.From.ID, comment.MediaID) {
-		log.Printf("⚠️  DM already sent to user %s for post %s", comment.From.ID, comment.MediaID)
+
+	// Duplicate check
+	if isDuplicate(c.From.ID, c.MediaID) {
+		log.Println("⚠️ Duplicate DM skipped")
 		return
 	}
-	
-	// Queue the DM job
-	job := DMJob{
-		UserID:    comment.From.ID,
-		PostID:    comment.MediaID,
-		CommentID: comment.ID,
-		Text:      comment.Text,
-		Username:  comment.From.Username,
+
+	// Queue the job
+	dmQueue <- DMJob{
+		UserID:    c.From.ID,
+		PostID:    c.MediaID,
+		CommentID: c.ID,
+		Text:      c.Text,
+		Username:  c.From.Username,
 		Timestamp: time.Now(),
 	}
-	
-	dmQueue <- job
-	log.Printf("✅ DM job queued for @%s", comment.From.Username)
+
+	log.Printf("📩 DM job queued for @%s", c.From.Username)
 }
 
+// DUPLICATE CHECKER
 func isDuplicate(userID, postID string) bool {
 	var count int
 	err := db.QueryRow(
 		"SELECT COUNT(*) FROM dm_logs WHERE user_id = $1 AND post_id = $2",
 		userID, postID,
 	).Scan(&count)
-	
-	if err != nil {
-		log.Println("Error checking duplicate:", err)
-		return false
-	}
-	
-	return count > 0
+
+	return err == nil && count > 0
 }
 
-// DM Worker - processes jobs with delay
+// DM WORKER
 func dmWorker() {
 	for job := range dmQueue {
-		// Wait for configured delay
+		log.Printf("⏳ Waiting %v before sending DM to @%s", config.DMDelay, job.Username)
 		time.Sleep(config.DMDelay)
-		
-		log.Printf("⏰ Sending DM to @%s (after %v delay)", job.Username, config.DMDelay)
-		
-		// Send DM with retry logic
+		log.Printf("📤 Sending DM to @%s (user: %s, post: %s)", job.Username, job.UserID, job.PostID)
 		err := sendDMWithRetry(job)
-		
+
 		if err != nil {
-			log.Printf("❌ Failed to send DM to @%s after retries: %v", job.Username, err)
+			log.Printf("❌ DM send failed for @%s: %v", job.Username, err)
 			logDM(job, "failed", err.Error())
 		} else {
 			log.Printf("✅ DM sent successfully to @%s", job.Username)
@@ -329,99 +336,89 @@ func dmWorker() {
 }
 
 func sendDMWithRetry(job DMJob) error {
-	var lastErr error
-	
+	var last error
+
 	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
 		if attempt > 0 {
 			backoff := config.RetryBackoffBase * time.Duration(1<<uint(attempt-1))
-			log.Printf("🔄 Retry %d/%d for @%s after %v", attempt, config.MaxRetries, job.Username, backoff)
 			time.Sleep(backoff)
 		}
-		
+
 		err := sendDM(job.UserID, config.DMMessage)
 		if err == nil {
 			return nil
 		}
-		
-		lastErr = err
-		log.Printf("⚠️  Attempt %d failed: %v", attempt+1, err)
+
+		last = err
 	}
-	
-	return lastErr
+
+	return last
 }
 
-func sendDM(recipientID, message string) error {
-	url := fmt.Sprintf("https://graph.facebook.com/v21.0/%s/messages", config.IGBusinessID)
-	
-	payload := map[string]interface{}{
-		"recipient": map[string]string{
-			"id": recipientID,
-		},
-		"message": map[string]string{
-			"text": message,
-		},
+// DM SENDER
+func sendDM(userID, message string) error {
+	url := fmt.Sprintf("https://graph.instagram.com/v15.0/%s/messages", config.IGBusinessID)
+
+	body := map[string]any{
+		"recipient": map[string]string{"id": userID},
+		"message":   map[string]string{"text": message},
 	}
-	
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-	
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	
+
+	jsonBody, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
-	req.URL.RawQuery = fmt.Sprintf("access_token=%s", config.AccessToken)
-	
+	req.Header.Set("Authorization", "Bearer "+config.AccessToken)
+
+	log.Printf("📡 API Call: POST %s", url)
+	log.Printf("📦 Payload: %s", string(jsonBody))
+
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		log.Printf("❌ Request error: %v", err)
+		return err
 	}
 	defer resp.Body.Close()
-	
-	body, _ := io.ReadAll(resp.Body)
-	
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(body))
+
+	b, _ := io.ReadAll(resp.Body)
+	log.Printf("📥 Response Status: %d", resp.StatusCode)
+	log.Printf("📥 Response Body: %s", string(b))
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("api_error_%d: %s", resp.StatusCode, string(b))
 	}
-	
+
 	return nil
 }
 
-func logDM(job DMJob, status, errorMsg string) {
+// DM LOGGING
+func logDM(job DMJob, status, errMsg string) {
 	_, err := db.Exec(`
 		INSERT INTO dm_logs (user_id, post_id, comment_id, status, error_message)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (user_id, post_id) DO UPDATE 
+		ON CONFLICT (user_id, post_id) DO UPDATE
 		SET retry_count = dm_logs.retry_count + 1,
 		    status = $4,
 		    error_message = $5,
 		    sent_at = CURRENT_TIMESTAMP
-	`, job.UserID, job.PostID, job.CommentID, status, errorMsg)
-	
+	`, job.UserID, job.PostID, job.CommentID, status, errMsg)
+
 	if err != nil {
-		log.Println("Error logging DM:", err)
+		log.Println("❌ DM log error:", err)
 	}
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	// Check database connection
+// HEALTH CHECK
+func healthHandler(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
 	if err := db.Ping(); err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "unhealthy",
-			"error":  err.Error(),
-		})
+		w.WriteHeader(503)
+		json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
 		return
 	}
-	
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":      "healthy",
-		"queue_size":  len(dmQueue),
-		"keywords":    config.Keywords,
+
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":     "healthy",
+		"queue_size": len(dmQueue),
+		"keywords":   config.Keywords,
 	})
 }
