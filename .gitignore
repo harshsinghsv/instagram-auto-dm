@@ -5,6 +5,7 @@
 # ===========================
 .env
 .env.local
+.env.example
 .env.production
 *.pem
 *.key
