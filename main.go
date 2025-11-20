@@ -356,6 +356,9 @@ func sendDMWithRetry(job DMJob) error {
 }
 
 // DM SENDER
+// Note: Instagram's 24-hour messaging rule applies:
+// You can only send DMs to users who have messaged you in the last 24 hours.
+// For development/testing, use test users from your Meta app.
 func sendDM(userID, message string) error {
 	url := fmt.Sprintf("https://graph.instagram.com/v15.0/%s/messages", config.IGBusinessID)
 
@@ -385,6 +388,17 @@ func sendDM(userID, message string) error {
 	log.Printf("📥 Response Body: %s", string(b))
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		// Parse error for better debugging
+		var errResp map[string]any
+		if err := json.Unmarshal(b, &errResp); err == nil {
+			if errData, ok := errResp["error"].(map[string]any); ok {
+				if code, ok := errData["code"].(float64); ok && code == 10 {
+					if subcode, ok := errData["error_subcode"].(float64); ok && subcode == 2534022 {
+						return fmt.Errorf("24_hour_messaging_window_expired: User must message you first or within 24 hours")
+					}
+				}
+			}
+		}
 		return fmt.Errorf("api_error_%d: %s", resp.StatusCode, string(b))
 	}
 
