@@ -87,6 +87,23 @@ var (
 	dmQueue chan DMJob
 )
 
+// CORS Middleware
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		// Handle preflight requests
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ENTRY POINT
 func main() {
 	// Load .env before anything else
@@ -114,10 +131,36 @@ func main() {
 	router.POST("/webhook", webhookPOSTHandler)
 	router.GET("/health", healthHandler)
 
+	// Add test endpoint
+	router.GET("/test", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		log.Println("✅ Test route called!")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "test OK"})
+	})
+
+	// Add production API routes
+	log.Println("📌 Setting up production API routes...")
+	setupRoutes(router)
+	log.Println("✅ Production API routes registered")
+	// Add CORS middleware wrapper
+	corsRouter := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		router.ServeHTTP(w, r)
+	})
+
 	// Start server
 	log.Printf("🚀 Instagram Auto-DM Server running on port %s", config.Port)
 	log.Printf("📌 Keywords: %v", config.Keywords)
-	log.Fatal(http.ListenAndServe(":"+config.Port, router))
+	log.Fatal(http.ListenAndServe(":"+config.Port, corsRouter))
 }
 
 // CONFIG LOADER
@@ -190,6 +233,51 @@ func createTables() {
 
 	CREATE INDEX IF NOT EXISTS idx_user_post ON dm_logs(user_id, post_id);
 	CREATE INDEX IF NOT EXISTS idx_status ON dm_logs(status);
+
+	-- New Tables for Production API
+	CREATE TABLE IF NOT EXISTS tbl_app_users (
+		id SERIAL PRIMARY KEY,
+		email VARCHAR(255) UNIQUE NOT NULL,
+		password_hash TEXT NOT NULL,
+		name VARCHAR(255),
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS tbl_ig_accounts (
+		id SERIAL PRIMARY KEY,
+		app_user_id INTEGER REFERENCES tbl_app_users(id),
+		platform_ig_account_id VARCHAR(255) UNIQUE NOT NULL,
+		platform_user_account_id VARCHAR(255),
+		username VARCHAR(255),
+		name VARCHAR(255),
+		access_token TEXT,
+		platform VARCHAR(50),
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS tbl_products (
+		id SERIAL PRIMARY KEY,
+		ig_account_id INTEGER REFERENCES tbl_ig_accounts(id),
+		name VARCHAR(255) NOT NULL,
+		description TEXT,
+		price DECIMAL(10, 2),
+		image_url TEXT,
+		product_link TEXT,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS tbl_dm_templates (
+		id SERIAL PRIMARY KEY,
+		ig_account_id INTEGER REFERENCES tbl_ig_accounts(id),
+		product_id INTEGER REFERENCES tbl_products(id),
+		template_name VARCHAR(255),
+		message_text TEXT,
+		include_download_link BOOLEAN DEFAULT FALSE,
+		download_link TEXT,
+		include_product_info BOOLEAN DEFAULT FALSE,
+		is_default BOOLEAN DEFAULT FALSE,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
 	`
 
 	_, err := db.Exec(schema)
